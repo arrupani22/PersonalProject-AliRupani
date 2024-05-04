@@ -1,0 +1,116 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import yfinance as yf
+import numpy as np
+from scipy.optimize import minimize
+import pandas as pd
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from threading import Thread
+from queue import Queue
+
+# Fetch S&P 500 stocks
+def fetch_sp500_tickers():
+    return ['AAPL', 'MSFT', 'AMZN', 'FB', 'GOOGL', 'GOOG', 'BRK-B', 'JNJ', 'V', 'PG', 'JPM']
+
+# Fetch historical stock data
+def fetch_stock_data(ticker):
+    end_date = datetime.today().strftime('%Y-%m-%d')
+    start_date = (datetime.today() - timedelta(days=365*5)).strftime('%Y-%m-%d')
+    data = yf.download(ticker, start=start_date, end=end_date)
+    return data['Adj Close']
+
+# Portfolio Optimization
+def optimize_portfolio(tickers, results_queue):
+    data = pd.DataFrame({ticker: fetch_stock_data(ticker) for ticker in tickers})
+    returns = data.pct_change().dropna()
+    mean_returns = returns.mean()
+    cov_matrix = returns.cov()
+    num_assets = len(tickers)
+    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    bounds = tuple((0, 1) for asset in range(num_assets))
+
+    def portfolio_variance(weights):
+        return np.dot(weights.T, np.dot(cov_matrix, weights))
+    
+    init_guess = num_assets * [1. / num_assets]
+    result = minimize(portfolio_variance, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+    results_queue.put(result.x)
+
+# GUI
+def main_app():
+    root = tk.Tk()
+    root.title("Financial Dashboard")
+
+    tab_control = ttk.Notebook(root)
+
+    # Stock Analysis Tab
+    tab1 = ttk.Frame(tab_control)
+    tab_control.add(tab1, text='Stock Analysis')
+    ttk.Label(tab1, text="Select Stock:").grid(column=0, row=0)
+    tickers = fetch_sp500_tickers()
+    ticker_var = tk.StringVar()
+    ticker_dropdown = ttk.Combobox(tab1, textvariable=ticker_var, values=tickers)
+    ticker_dropdown.grid(column=1, row=0)
+    ticker_dropdown.current(0)
+    canvas_frame = tk.Frame(tab1)
+    canvas_frame.grid(column=0, row=1, columnspan=3)
+    data_queue = Queue()
+
+    def draw_plot(data):
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(data.index, data.values)
+        ax.set(title=f'{ticker_var.get()} Historical Stock Prices', xlabel='Date', ylabel='Adjusted Close Price')
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    def prepare_data():
+        ticker = ticker_var.get()
+        data = fetch_stock_data(ticker)
+        data_queue.put(data)
+        root.after(100, update_plot)
+
+    def update_plot():
+        if not data_queue.empty():
+            data = data_queue.get()
+            draw_plot(data)
+
+    def show_graph():
+        Thread(target=prepare_data).start()
+
+    graph_button = ttk.Button(tab1, text="Show Stock Graph", command=show_graph)
+    graph_button.grid(column=2, row=0)
+
+    # Portfolio Analysis Tab
+    tab2 = ttk.Frame(tab_control)
+    tab_control.add(tab2, text='Portfolio Analysis')
+    ttk.Label(tab2, text="Enter Portfolio Stocks (comma-separated):").grid(column=0, row=0)
+    portfolio_entry = tk.Entry(tab2, width=50)
+    portfolio_entry.grid(column=1, row=0)
+    optimize_button = ttk.Button(tab2, text="Optimize Portfolio", command=lambda: Thread(target=optimize_and_show).start())
+    optimize_button.grid(column=2, row=0)
+    result_label = tk.Label(tab2, text="")
+    result_label.grid(column=0, row=1, columnspan=3)
+    results_queue = Queue()
+
+    def optimize_and_show():
+        portfolio_tickers = portfolio_entry.get().split(',')
+        if len(portfolio_tickers) > 50:
+            messagebox.showerror("Error", "Maximum 50 stocks are allowed.")
+            return
+        optimize_portfolio(portfolio_tickers, results_queue)
+        root.after(100, show_optimized_weights)
+
+    def show_optimized_weights():
+        if not results_queue.empty():
+            weights = results_queue.get()
+            result_label.config(text=f"Optimized Weights: {weights}")
+
+    tab_control.pack(expand=1, fill="both")
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    main_app()
